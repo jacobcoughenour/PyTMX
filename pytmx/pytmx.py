@@ -34,12 +34,14 @@ from six.moves import map
 
 __all__ = (
     'TiledElement',
+    'TiledLayerList',
     'TiledMap',
     'TiledTileset',
     'TiledTileLayer',
     'TiledObject',
     'TiledObjectGroup',
     'TiledImageLayer',
+    'TiledGroupLayer',
     'TileFlags',
     'convert_to_bool',
     'parse_properties')
@@ -274,7 +276,8 @@ class TiledElement(object):
         if (not self.allow_duplicate_names and
                 self._contains_invalid_property_name(properties.items())):
             self._log_property_error_message()
-            raise ValueError("Reserved names and duplicate names are not allowed. Please rename your property inside the .tmx-file")
+            raise ValueError(
+                "Reserved names and duplicate names are not allowed. Please rename your property inside the .tmx-file")
 
         self.properties = properties
 
@@ -288,7 +291,105 @@ class TiledElement(object):
         return '<{0}: "{1}">'.format(self.__class__.__name__, self.name)
 
 
-class TiledMap(TiledElement):
+class TiledLayerList(TiledElement):
+    """ Represents a Tiled Group of layers
+
+    Supports any operation of a normal list.
+    """
+
+    def __init__(self):
+        TiledElement.__init__(self)
+
+        self.all_layers = list()  # all layers in proper order
+        self.layers = list()  # all layers in proper order
+        self.layernames = dict()
+
+    # iterate over layers and objects in list
+    def __iter__(self):
+        return chain(self.layers, self.objects)
+
+    def parse_xml(self, node):
+        """ Parse the sub layers from ElementTree xml node
+
+        :param node: ElementTree xml node
+        :return: self
+        """
+
+        for subnode in node:
+            if subnode.tag == 'layer':
+                self.add_layer(TiledTileLayer(self, subnode))
+            elif subnode.tag == 'imagelayer':
+                self.add_layer(TiledImageLayer(self, subnode))
+            elif subnode.tag == 'objectgroup':
+                self.add_layer(TiledObjectGroup(self, subnode))
+            elif subnode.tag == 'group':
+                self.add_layer(TiledGroupLayer(self, subnode))
+
+        return self
+
+    def add_layer(self, layer):
+        """ Add a layer (TileTileLayer, TiledImageLayer, TiledObjectGroup, or TiledGroupLayer)
+
+        :param layer: TileTileLayer, TiledImageLayer, TiledObjectGroup, TiledGroupLayer object
+        """
+        assert (
+            isinstance(layer,
+                       (TiledTileLayer, TiledImageLayer, TiledObjectGroup, TiledGroupLayer)))
+
+        self.all_layers.append(layer)
+        self.layernames[layer.name] = layer
+
+        if isinstance(layer, TiledGroupLayer):
+            for sub_layer in layer.layers:
+                self.add_layer(sub_layer)
+        else:
+            self.layers.append(layer)
+
+    @property
+    def objectgroups(self):
+        """Return iterator of all object groups
+
+        :rtype: Iterator
+        """
+        return (layer for layer in self.all_layers
+                if isinstance(layer, TiledObjectGroup))
+
+    @property
+    def objects(self):
+        """Return iterator of all the objects associated with this map
+
+        :rtype: Iterator
+        """
+        return chain(*self.objectgroups)
+
+    @property
+    def visible_layers(self):
+        """Return iterator of Layer objects that are set 'visible'
+
+        :rtype: Iterator
+        """
+        return (l for l in self.all_layers if l.visible)
+
+    @property
+    def visible_tile_layers(self):
+        """Return iterator of layer indexes that are set 'visible'
+
+        :rtype: Iterator
+        """
+        return (i for (i, l) in enumerate(self.all_layers)
+                if l.visible and isinstance(l, TiledTileLayer))
+
+    @property
+    def visible_object_groups(self):
+        """Return iterator of object group indexes that are set 'visible'
+
+        :rtype: Iterator
+        """
+        return (i for (i, l) in enumerate(self.all_layers)
+                if l.visible and isinstance(l, TiledObjectGroup))
+
+
+class TiledMap(TiledLayerList):
     """Contains the layers, objects, and images from a Tiled TMX map
 
     This class is meant to handle most of the work you need to do to use a map.
@@ -309,7 +410,7 @@ class TiledMap(TiledElement):
           (filename of image, bounding rect of tile in image, flags)
           the function must return a reference to to the tile.
         """
-        TiledElement.__init__(self)
+        TiledLayerList.__init__(self)
         self.filename = filename
         self.image_loader = image_loader
 
@@ -322,10 +423,8 @@ class TiledMap(TiledElement):
         TiledElement.allow_duplicate_names = \
             kwargs.get('allow_duplicate_names', False)
 
-        self.layers = list()  # all layers in proper order
         self.tilesets = list()  # TiledTileset objects
         self.tile_properties = dict()  # tiles that have properties
-        self.layernames = dict()
 
         # only used tiles are actually loaded, so there will be a difference
         # between the GIDs in the Tiled map data (tmx) and the data in this
@@ -362,10 +461,6 @@ class TiledMap(TiledElement):
     def __repr__(self):
         return '<{0}: "{1}">'.format(self.__class__.__name__, self.filename)
 
-    # iterate over layers and objects in map
-    def __iter__(self):
-        return chain(self.layers, self.objects)
-
     def _set_properties(self, node):
         TiledElement._set_properties(self, node)
 
@@ -385,16 +480,8 @@ class TiledMap(TiledElement):
         self.background_color = node.get('backgroundcolor',
                                          self.background_color)
 
-        # ***         do not change this load order!         *** #
-        # ***    gid mapping errors will occur if changed    *** #
-        for subnode in node.findall('layer'):
-            self.add_layer(TiledTileLayer(self, subnode))
-
-        for subnode in node.findall('imagelayer'):
-            self.add_layer(TiledImageLayer(self, subnode))
-
-        for subnode in node.findall('objectgroup'):
-            self.add_layer(TiledObjectGroup(self, subnode))
+        # parse layers from map xml
+        TiledLayerList.parse_xml(self, node)
 
         for subnode in node.findall('tileset'):
             self.add_tileset(TiledTileset(self, subnode))
@@ -652,18 +739,6 @@ class TiledMap(TiledElement):
             except KeyError:
                 continue
 
-    def add_layer(self, layer):
-        """ Add a layer (TileTileLayer, TiledImageLayer, or TiledObjectGroup)
-
-        :param layer: TileTileLayer, TiledImageLayer, TiledObjectGroup object
-        """
-        assert (
-            isinstance(layer,
-                       (TiledTileLayer, TiledImageLayer, TiledObjectGroup)))
-
-        self.layers.append(layer)
-        self.layernames[layer.name] = layer
-
     def add_tileset(self, tileset):
         """ Add a tileset to the map
 
@@ -716,49 +791,6 @@ class TiledMap(TiledElement):
                 return tileset
 
         raise ValueError
-
-    @property
-    def objectgroups(self):
-        """Return iterator of all object groups
-
-        :rtype: Iterator
-        """
-        return (layer for layer in self.layers
-                if isinstance(layer, TiledObjectGroup))
-
-    @property
-    def objects(self):
-        """Return iterator of all the objects associated with this map
-
-        :rtype: Iterator
-        """
-        return chain(*self.objectgroups)
-
-    @property
-    def visible_layers(self):
-        """Return iterator of Layer objects that are set 'visible'
-
-        :rtype: Iterator
-        """
-        return (l for l in self.layers if l.visible)
-
-    @property
-    def visible_tile_layers(self):
-        """Return iterator of layer indexes that are set 'visible'
-
-        :rtype: Iterator
-        """
-        return (i for (i, l) in enumerate(self.layers)
-                if l.visible and isinstance(l, TiledTileLayer))
-
-    @property
-    def visible_object_groups(self):
-        """Return iterator of object group indexes that are set 'visible'
-
-        :rtype: Iterator
-        """
-        return (i for (i, l) in enumerate(self.layers)
-                if l.visible and isinstance(l, TiledObjectGroup))
 
     def register_gid(self, tiled_gid, flags=None):
         """ Used to manage the mapping of GIDs between the tmx and pytmx
@@ -888,7 +920,7 @@ class TiledTileset(TiledElement):
 
             p = {k: types[k](v) for k, v in child.items()}
             p.update(parse_properties(child))
-            
+
             # images are listed as relative to the .tsx file, not the .tmx file:
             if source and "path" in p:
                 p["path"] = os.path.join(os.path.dirname(source), p["path"])
@@ -901,7 +933,7 @@ class TiledTileset(TiledElement):
             else:
                 tile_source = image.get('source')
                 # images are listed as relative to the .tsx file, not the .tmx file:
-                if source and tile_source: 
+                if source and tile_source:
                     tile_source = os.path.join(os.path.dirname(source), tile_source)
                 p['source'] = tile_source
                 p['trans'] = image.get('trans', None)
@@ -931,11 +963,11 @@ class TiledTileset(TiledElement):
         image_node = node.find('image')
         if image_node is not None:
             self.source = image_node.get('source')
-            
+
             # When loading from tsx, tileset image path is relative to the tsx file, not the tmx:
             if source:
                 self.source = os.path.join(os.path.dirname(source), self.source)
-            
+
             self.trans = image_node.get('trans', None)
             self.width = int(image_node.get('width'))
             self.height = int(image_node.get('height'))
@@ -1226,6 +1258,39 @@ class TiledImageLayer(TiledElement):
         image_node = node.find('image')
         self.source = image_node.get('source', None)
         self.trans = image_node.get('trans', None)
+        return self
+
+
+class TiledGroupLayer(TiledLayerList):
+    """ Represents a Tiled GroupLayer
+
+    Supports any operation of a normal list.
+    """
+
+    def __init__(self, parent, node):
+        TiledLayerList.__init__(self)
+        self.parent = parent
+
+        # defaults from the specification
+        self.name = None
+        self.color = None
+        self.opacity = 1
+        self.visible = 1
+        self.offsetx = 0
+        self.offsety = 0
+
+        self.parse_xml(node)
+
+    def parse_xml(self, node):
+        """ Parse an Object Group from ElementTree xml node
+
+        :param node: ElementTree xml node
+        :return: self
+        """
+        self._set_properties(node)
+
+        TiledLayerList.parse_xml(self, node)
+
         return self
 
 
