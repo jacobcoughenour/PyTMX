@@ -38,6 +38,7 @@ __all__ = (
     'TiledMap',
     'TiledTileset',
     'TiledTileLayer',
+    'TiledTemplate',
     'TiledObject',
     'TiledObjectGroup',
     'TiledImageLayer',
@@ -279,7 +280,7 @@ class TiledElement(object):
             raise ValueError(
                 "Reserved names and duplicate names are not allowed. Please rename your property inside the .tmx-file")
 
-        self.properties = properties
+        self.properties.update(properties)
 
     def __getattr__(self, item):
         try:
@@ -1144,6 +1145,49 @@ class TiledObjectGroup(TiledElement, list):
         return self
 
 
+# loaded TiledTemplates
+loaded_templates = dict()
+
+
+class TiledTemplate(TiledElement):
+    """ Represents a Tiled Template Object
+    """
+
+    def __init__(self, path):
+        TiledElement.__init__(self)
+
+        self.path = path
+        self.object_node = None
+
+        try:
+            self.parse_xml(ElementTree.parse(path).getroot())
+
+        except IOError:
+            msg = "Cannot load external template: {0}"
+            logger.error(msg.format(path))
+            raise Exception
+
+    @classmethod
+    def get(cls, path):
+        """ Get an existing instance of a template or creates one
+        :param path: full path to the template file
+        :return: instance of the template
+        """
+        if path not in loaded_templates:
+            loaded_templates[path] = TiledTemplate(path)
+        return loaded_templates[path]
+
+    def parse_xml(self, node):
+        """ Parse an Object Template from ElementTree xml node
+
+        :param node: ElementTree xml node
+        :return: self
+        """
+        self.object_node = node.find('object', None)
+
+        return self
+
+
 class TiledObject(TiledElement):
     """ Represents a any Tiled Object
 
@@ -1182,16 +1226,42 @@ class TiledObject(TiledElement):
         :return: self
         """
 
-        def read_points(text):
-            """parse a text string of float tuples and return [(x,...),...]
-            """
-            return tuple(tuple(map(float, i.split(','))) for i in text.split())
+        import os
+
+        # if true, then node references a template file
+        template = node.get('template', None)
+        if template:
+            if template[-3:].lower() == ".tx":
+                # we need to mangle the path - tiled stores relative paths
+                dirname = os.path.dirname(self.parent.filename)
+                path = os.path.abspath(os.path.join(dirname, template))
+                self.template = TiledTemplate.get(path)
+
+                # apply template first
+                self._set_properties(self.template.object_node)
+                self._parse_points(self.template.object_node)
+
+            else:
+                msg = "Found external template, but cannot handle type: {0}"
+                logger.error(msg.format(self.template))
+                raise Exception
 
         self._set_properties(node)
 
         # correctly handle "tile objects" (object with gid set)
         if self.gid:
             self.gid = self.parent.register_gid(self.gid)
+
+        self._parse_points(node)
+
+        return self
+
+    def _parse_points(self, node):
+
+        def read_points(text):
+            """parse a text string of float tuples and return [(x,...),...]
+            """
+            return tuple(tuple(map(float, i.split(','))) for i in text.split())
 
         points = None
         polygon = node.find('polygon')
